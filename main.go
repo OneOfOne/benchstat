@@ -95,12 +95,15 @@ import (
 	"flag"
 	"fmt"
 	"html"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"os/exec"
 
 	"rsc.io/benchstat/internal/go-moremath/stats"
 )
@@ -113,10 +116,13 @@ func usage() {
 }
 
 var (
-	flagDeltaTest = flag.String("delta-test", "utest", "significance `test` to apply to delta: utest, ttest, or none")
-	flagAlpha     = flag.Float64("alpha", 0.05, "consider change significant if p < `α`")
-	flagGeomean   = flag.Bool("geomean", false, "print the geometric mean of each file")
-	flagHTML      = flag.Bool("html", false, "print results as an HTML table")
+	flagDeltaTest  = flag.String("delta-test", "utest", "significance `test` to apply to delta: utest, ttest, or none")
+	flagAlpha      = flag.Float64("alpha", 0.05, "consider change significant if p < `α`")
+	flagGeomean    = flag.Bool("geomean", false, "print the geometric mean of each file")
+	flagHTML       = flag.Bool("html", false, "print results as an HTML table")
+	flagBench      = flag.String("bench", "", "run go test -bench=value, the results are treated as last input in the chain.")
+	flagBenchTime  = flag.String("time", "1s", "go test -benchtime=")
+	flagBenchCount = flag.Int("count", 1, "go test -count")
 )
 
 var deltaTestNames = map[string]func(old, new *Benchstat) (float64, error){
@@ -153,12 +159,18 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 	deltaTest := deltaTestNames[strings.ToLower(*flagDeltaTest)]
-	if flag.NArg() < 1 || deltaTest == nil {
+
+	if len(*flagBench) == 0 && flag.NArg() < 1 || deltaTest == nil {
 		flag.Usage()
 	}
 
 	// Read in benchmark data.
 	c := readFiles(flag.Args())
+
+	if len(*flagBench) > 0 {
+		execGoBench(c)
+	}
+
 	for _, stat := range c.Stats {
 		stat.ComputeStats()
 	}
@@ -521,21 +533,36 @@ func (c *Collection) AddStat(key BenchKey) *Benchstat {
 	return stat
 }
 
+// execGoBench executes go test -bench and parses the results
+func execGoBench(c *Collection) {
+	cmd := exec.Command("go", "test", "-run=-", "-bench", *flagBench, "-benchmem", "-count", strconv.Itoa(*flagBenchCount), "-benchtime", *flagBenchTime)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatal(err)
+	}
+	readFile(bytes.NewReader(out), "exec", c)
+}
+
 // readFiles reads a set of benchmark files.
 func readFiles(files []string) *Collection {
 	c := Collection{Stats: make(map[BenchKey]*Benchstat)}
 	for _, file := range files {
-		readFile(file, &c)
+		f, err := os.Open(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+		readFile(f, file, &c)
+		f.Close()
 	}
 	return &c
 }
 
 // readFile reads a set of benchmarks from a file in to a Collection.
-func readFile(file string, c *Collection) {
+func readFile(r io.Reader, file string, c *Collection) {
 	c.Configs = append(c.Configs, file)
 	key := BenchKey{Config: file}
 
-	text, err := ioutil.ReadFile(file)
+	text, err := ioutil.ReadAll(r)
 	if err != nil {
 		log.Fatal(err)
 	}
